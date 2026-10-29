@@ -32,6 +32,28 @@ Galeria de fotografias moderna, responsiva e elegante construída com **Next.js 
 4. Crie um ficheiro .env.local na raiz do projeto com esses valores
 5. Vá a Storage → Buckets e confirme que o bucket photo-gallery existe e é público
 
+### 1.1 Passos obrigatórios (2 minutos)
+
+**a) Executar o schema**
+Abre o SQL Editor do teu projeto:
+https://supabase.com/dashboard/project/umthukcidhsbfxqomzgt/sql/new
+Cola **todo** o conteúdo de `supabase-schema.sql` e clica **Run**.
+Isto cria a tabela `photos`, o bucket `photo-gallery` e as políticas RLS.
+
+**b) Ativar sessão anónima (necessário para o upload)**
+Authentication → Sign In / Providers → ativa **Allow anonymous sign-ins** → Save.
+
+> Alternativa sem autenticação (apenas para demo): em vez do passo (b), executa
+> `supabase-schema-public-write.sql`. Qualquer pessoa poderá inserir fotos.
+
+**c) Verificar**
+```bash
+# deve devolver [] (lista vazia) e HTTP 200
+curl.exe -s -w "\nHTTP:%{http_code}" "https://umthukcidhsbfxqomzgt.supabase.co/rest/v1/photos?select=id&limit=1" ^
+  -H "apikey: sb_publishable_18M3ka_nSZNJT3b-HUC_bw_2CGty6cg" ^
+  -H "Authorization: Bearer sb_publishable_18M3ka_nSZNJT3b-HUC_bw_2CGty6cg"
+```
+
 ## 💻 Desenvolvimento Local
 
 ```bash

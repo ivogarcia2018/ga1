@@ -52,6 +52,12 @@ export default function Home() {
     setShowUpload(false);
   };
 
+  const handleRetry = () => {
+    setError(null);
+    setLoading(true);
+    fetchPhotos();
+  };
+
   if (loading) {
     return (
       <div className="min-h-[60vh] flex flex-col items-center justify-center">
@@ -84,6 +90,27 @@ export default function Home() {
           </p>
         </div>
       </div>
+
+      {error && hasSupabaseConfig && (
+        <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
+          <div className="rounded-xl bg-red-50 border border-red-200 p-5 flex items-start gap-3">
+            <div className="text-red-600 text-lg leading-none">!</div>
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-red-800">
+                Nao foi possivel carregar as fotografias
+              </p>
+              <p className="mt-1 text-sm text-red-700 break-words">{error}</p>
+              <button
+                onClick={handleRetry}
+                className="mt-3 text-sm font-medium text-red-700 underline hover:text-red-900"
+              >
+                Tentar novamente
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {!hasSupabaseConfig && (
         <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 py-12">

@@ -1,12 +1,24 @@
-﻿"use client";
+"use client";
 
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { Upload, Image as ImageIcon, FileText, Camera } from "lucide-react";
+import { Upload, Image as ImageIcon, FileText, Camera, CheckCircle2, AlertTriangle } from "lucide-react";
 
 interface UploadFormProps {
   onSuccess?: () => void;
 }
+
+const CATEGORIES = [
+  { value: "geral", label: "Geral" },
+  { value: "paisagem", label: "Paisagem" },
+  { value: "retrato", label: "Retrato" },
+  { value: "arquitetura", label: "Arquitetura" },
+  { value: "natureza", label: "Natureza" },
+  { value: "urbano", label: "Urbano" },
+];
+
+const INPUT =
+  "w-full px-4 py-3 rounded-lg border border-gray-200 focus:ring-2 focus:ring-pink-500 focus:border-pink-500 outline-none transition-all disabled:bg-gray-50 disabled:text-gray-400";
 
 export default function UploadForm({ onSuccess }: UploadFormProps = {}) {
   const [title, setTitle] = useState("");
@@ -15,18 +27,8 @@ export default function UploadForm({ onSuccess }: UploadFormProps = {}) {
   const [tags, setTags] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-
-  const categories = [
-    { value: "geral", label: "Geral" },
-    { value: "paisagem", label: "Paisagem" },
-    { value: "retrato", label: "Retrato" },
-    { value: "arquitetura", label: "Arquitetura" },
-    { value: "natureza", label: "Natureza" },
-    { value: "urbano", label: "Urbano" },
-  ];
 
   const hasSupabaseConfig =
     Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL) &&
@@ -34,26 +36,34 @@ export default function UploadForm({ onSuccess }: UploadFormProps = {}) {
 
   const supabase = hasSupabaseConfig ? createClient() : null;
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0] ?? null;
-    setFile(selectedFile);
-    setError(null);
-  };
+  // Garante uma sessao (anonima se nao existir) para satisfazer as politicas RLS.
+  async function getUserId(): Promise<string> {
+    if (!supabase) throw new Error("Supabase nao configurado (.env.local em falta).");
 
-  const handleTagsChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setTags(e.target.value);
-  };
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (sessionData.session?.user) return sessionData.session.user.id;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!hasSupabaseConfig) {
-      setError(
-        "Variaveis de ambiente do Supabase nao configuradas. Crie um ficheiro .env.local."
+    const { data, error: authError } = await supabase.auth.signInAnonymously();
+    if (authError || !data.user) {
+      throw new Error(
+        "Nao foi possivel criar uma sessao. Ative Authentication > Sign In / Providers > Allow anonymous sign-ins no Supabase, ou execute supabase-schema-public-write.sql."
       );
+    }
+    return data.user.id;
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) {
+      setError("Supabase nao configurado. Crie o ficheiro .env.local.");
       return;
     }
-    if (!file || !supabase) {
+    if (!file) {
       setError("Por favor, selecione uma imagem.");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setError("A imagem excede o limite de 10 MB.");
       return;
     }
 
@@ -61,66 +71,67 @@ export default function UploadForm({ onSuccess }: UploadFormProps = {}) {
     setError(null);
 
     try {
-      const fileExt = file.name.split(".").pop();
-      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${fileExt}`;
-      const storagePath = `public/${fileName}`;
+      const userId = await getUserId();
+      const ext = file.name.split(".").pop() ?? "jpg";
+      const storagePath = `${userId}/${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}.${ext}`;
 
-      const { data: uploadData, error: uploadError } = await supabase.storage
+      const { error: uploadError } = await supabase.storage
         .from("photo-gallery")
-        .upload(storagePath, file, {
-          cacheControl: "3600",
-          upsert: false,
-        });
-
+        .upload(storagePath, file, { cacheControl: "3600", upsert: false });
       if (uploadError) throw uploadError;
 
       const { data: urlData } = supabase.storage
         .from("photo-gallery")
         .getPublicUrl(storagePath);
 
-      const { error: dbError } = await supabase.from("photos").insert([
-        {
-          title: title || file.name.replace(/\\.[^/.]+$/, ""),
-          description: description || null,
-          image_url: urlData.publicUrl,
-          storage_path: storagePath,
-          category,
-          tags: tags ? tags.split(",").map((t) => t.trim()).filter(Boolean) : [],
-          uploaded_by: (await supabase.auth.getUser()).data.user?.id ?? null,
-        },
-      ]);
-
+      const { error: dbError } = await supabase.from("photos").insert({
+        title: title.trim() || file.name.replace(/\.[^/.]+$/, ""),
+        description: description.trim() || null,
+        image_url: urlData.publicUrl,
+        storage_path: storagePath,
+        category,
+        tags: tags
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+        size_bytes: file.size,
+        uploaded_by: userId,
+      });
       if (dbError) throw dbError;
 
       setSuccess(true);
-      setUploading(false);
-      setTimeout(() => {
-        setSuccess(false);
-        onSuccess?.();
-      }, 3000);
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Erro ao fazer upload da fotografia.");
+      setTitle("");
+      setDescription("");
+      setTags("");
+      setCategory("geral");
+      setFile(null);
+      onSuccess?.();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Erro ao enviar a fotografia.";
+      setError(
+        /row-level security/i.test(message)
+          ? "Permissao negada pelo Supabase (RLS). Executa o supabase-schema.sql no SQL Editor e ativa o acesso anonimo."
+          : message
+      );
+    } finally {
       setUploading(false);
     }
-  };
+  }
 
   if (success) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-center">
         <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center text-green-600 mb-4">
-          <Camera size={32} strokeWidth={2} />
+          <CheckCircle2 size={32} strokeWidth={2} />
         </div>
         <h3 className="text-lg font-semibold text-gray-900">Upload concluido!</h3>
-        <p className="mt-2 text-gray-500">A sua fotografia foi adicionada à galeria.</p>
+        <p className="mt-2 text-gray-500">A tua fotografia foi adicionada a galeria.</p>
         <button
-          onClick={() => {
-            setSuccess(false);
-            setTitle("");
-            setDescription("");
-            setFile(null);
-          }}
-          className="mt-6 text-pink-600 font-medium hover:text-pink-700"
+          type="button"
+          onClick={() => setSuccess(false)}
+          className="mt-6 px-5 py-2.5 rounded-lg bg-pink-600 text-white font-medium text-sm hover:bg-pink-700 transition-colors"
         >
           Adicionar outra
         </button>
@@ -129,150 +140,150 @@ export default function UploadForm({ onSuccess }: UploadFormProps = {}) {
   }
 
   return (
-    <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
-        <div className="mb-6">
-          <h2 className="text-2xl font-bold text-gray-900">Adicionar Nova Fotografia</h2>
-          <p className="mt-2 text-gray-500">Partilhe as suas melhores imagens com o mundo.</p>
+    <form onSubmit={handleSubmit} className="space-y-5">
+      {!hasSupabaseConfig && (
+        <div className="rounded-lg bg-amber-50 border border-amber-200 p-4 flex gap-3">
+          <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0" />
+          <div className="text-xs text-amber-800">
+            <p className="font-semibold text-amber-900 mb-1">Configuracao necessaria</p>
+            Cria um ficheiro <code className="bg-amber-100 px-1 rounded">.env.local</code> com{" "}
+            <code className="bg-amber-100 px-1 rounded">NEXT_PUBLIC_SUPABASE_URL</code> e{" "}
+            <code className="bg-amber-100 px-1 rounded">NEXT_PUBLIC_SUPABASE_ANON_KEY</code>.
+          </div>
         </div>
+      )}
 
-        {!hasSupabaseConfig && (
-          <div className="mb-6 rounded-lg bg-amber-50 border border-amber-200 p-4">
-            <h3 className="text-sm font-bold text-amber-900 mb-2">Configuracao Necessaria</h3>
-            <p className="text-amber-800 text-xs">
-              Crie um ficheiro .env.local com NEXT_PUBLIC_SUPABASE_URL e NEXT_PUBLIC_SUPABASE_ANON_KEY.
-            </p>
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit} className="space-y-5">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Título</label>
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Título da fotografia"
-                className="w-full px-4 py-3 rounded-lg border border-gray-200 focus:ring-2 focus:ring-pink-500 focus:border-pink-500 outline-none transition-all"
-                disabled={!hasSupabaseConfig}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Categoria</label>
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value as string)}
-                className="w-full px-4 py-3 rounded-lg border border-gray-200 focus:ring-2 focus:ring-pink-500 focus:border-pink-500 outline-none bg-white transition-all"
-                disabled={!hasSupabaseConfig}
-              >
-                {categories.map((cat) => (
-                  <option key={cat.value} value={cat.value}>{cat.label}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Descricao</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Conte-nos sobre esta fotografia..."
-              rows={3}
-              className="w-full px-4 py-3 rounded-lg border border-gray-200 focus:ring-2 focus:ring-pink-500 focus:border-pink-500 outline-none transition-all"
-              disabled={!hasSupabaseConfig}
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Tags (separadas por virgula)</label>
-            <input
-              type="text"
-              value={tags}
-              onChange={handleTagsChange}
-              placeholder="ex: natureza, verao, viagem"
-              className="w-full px-4 py-3 rounded-lg border border-gray-200 focus:ring-2 focus:ring-pink-500 focus:border-pink-500 outline-none transition-all"
-              disabled={!hasSupabaseConfig}
-            />
-            <p className="mt-1 text-xs text-gray-500">Exemplo: paisagem, montanha, por do sol</p>
-          </div>
-
-          <div className="border-2 border-dashed border-gray-200 rounded-lg p-8 text-center hover:border-pink-300 hover:bg-pink-50 transition-colors relative overflow-hidden">
-            <input
-              type="file"
-              accept="image/*"
-              onChange={handleFileChange}
-              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-              disabled={!hasSupabaseConfig || !file}
-            />
-            <div className="flex flex-col items-center justify-center pointer-events-none">
-              <div className="w-12 h-12 rounded-full bg-pink-100 flex items-center justify-center text-pink-600 mb-3">
-                <Upload size={24} strokeWidth={2} />
-              </div>
-              <p className="text-sm font-medium text-gray-900">Clique para selecionar uma imagem</p>
-              <p className="mt-1 text-xs text-gray-500">JPG, PNG, WEBP • Max. 10MB</p>
-            </div>
-            {file && (
-              <div className="mt-4 flex items-center justify-between px-4 py-2 bg-gray-50 rounded-lg">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center">
-                    <ImageIcon size={14} strokeWidth={1.5} />
-                  </div>
-                  <div>
-                    <p className="text-sm font-medium text-gray-900 truncate">{file.name}</p>
-                    <p className="text-xs text-gray-500">
-                      {(file.size / 1024 / 1024).toFixed(2)} MB
-                    </p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setFile(null)}
-                  className="text-xs text-gray-500 hover:text-red-500"
-                >
-                  Remover
-                </button>
-              </div>
-            )}
-          </div>
-
-          {error && (
-            <div className="rounded-lg bg-red-50 border border-red-200 p-4">
-              <div className="flex">
-                <div className="flex-shrink-0">
-                  <FileText className="h-5 w-5 text-red-600" />
-                </div>
-                <div className="ml-3">
-                  <h3 className="text-sm font-medium text-red-800">Erro</h3>
-                  <div className="mt-0.5 text-sm text-red-700">{error}</div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={uploading || !file || !hasSupabaseConfig}
-            className={`w-full py-4 rounded-lg font-semibold text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed ${uploading || !file || !hasSupabaseConfig ? "bg-gray-300" : "bg-pink-600 hover:bg-pink-700 shadow-md hover:shadow-lg hover:-translate-y-0.5"}`}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <div>
+          <label htmlFor="photo-title" className="block text-sm font-medium text-gray-700 mb-2">
+            Titulo
+          </label>
+          <input
+            id="photo-title"
+            type="text"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="Titulo da fotografia"
+            className={INPUT}
+            disabled={!hasSupabaseConfig}
+          />
+        </div>
+        <div>
+          <label htmlFor="photo-category" className="block text-sm font-medium text-gray-700 mb-2">
+            Categoria
+          </label>
+          <select
+            id="photo-category"
+            value={category}
+            onChange={(event) => setCategory(event.target.value)}
+            className={INPUT}
+            disabled={!hasSupabaseConfig}
           >
-            {uploading ? (
-              <>
-                <div className="flex items-center justify-between w-full">
-                  <span>A fazer upload...</span>
-                  <span className="font-mono text-sm">{progress.toFixed(0)}%</span>
-                </div>
-                <div className="w-full bg-gray-200 rounded-full h-1.5 mt-2 overflow-hidden">
-                  <div className="bg-pink-600 h-full rounded-full" style={{ width: `${progress}%` }} />
-                </div>
-              </>
-            ) : (
-              "Publicar Fotografia"
-            )}
-          </button>
-        </form>
+            {CATEGORIES.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
-    </div>
+
+      <div>
+        <label htmlFor="photo-description" className="block text-sm font-medium text-gray-700 mb-2">
+          Descricao
+        </label>
+        <textarea
+          id="photo-description"
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          placeholder="Conta-nos sobre esta fotografia..."
+          rows={3}
+          className={INPUT}
+          disabled={!hasSupabaseConfig}
+        />
+      </div>
+
+      <div>
+        <label htmlFor="photo-tags" className="block text-sm font-medium text-gray-700 mb-2">
+          Tags <span className="text-gray-400 font-normal">(separadas por virgula)</span>
+        </label>
+        <input
+          id="photo-tags"
+          type="text"
+          value={tags}
+          onChange={(event) => setTags(event.target.value)}
+          placeholder="ex: natureza, verao, viagem"
+          className={INPUT}
+          disabled={!hasSupabaseConfig}
+        />
+      </div>
+
+      <div className="border-2 border-dashed border-gray-200 rounded-lg p-6 text-center hover:border-pink-300 hover:bg-pink-50/50 transition-colors relative">
+        <input
+          type="file"
+          accept="image/*"
+          onChange={(event) => {
+            setFile(event.target.files?.[0] ?? null);
+            setError(null);
+          }}
+          aria-label="Selecionar imagem"
+          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-not-allowed"
+          disabled={!hasSupabaseConfig || uploading}
+        />
+        <div className="flex flex-col items-center justify-center pointer-events-none">
+          <div className="w-12 h-12 rounded-full bg-pink-100 flex items-center justify-center text-pink-600 mb-3">
+            <Upload size={22} strokeWidth={2} />
+          </div>
+          <p className="text-sm font-medium text-gray-900">Clique para selecionar uma imagem</p>
+          <p className="mt-1 text-xs text-gray-500">JPG, PNG, WEBP, GIF, AVIF • Max. 10 MB</p>
+        </div>
+      </div>
+
+      {file && (
+        <div className="flex items-center justify-between px-4 py-3 bg-gray-50 rounded-lg border border-gray-100">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-full bg-white border border-gray-200 flex items-center justify-center shrink-0">
+              <ImageIcon size={15} strokeWidth={1.5} className="text-gray-500" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-gray-900 truncate">{file.name}</p>
+              <p className="text-xs text-gray-500">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFile(null)}
+            className="text-xs font-medium text-gray-500 hover:text-red-500 shrink-0 ml-3"
+          >
+            Remover
+          </button>
+        </div>
+      )}
+
+      {error && (
+        <div className="rounded-lg bg-red-50 border border-red-200 p-4 flex gap-3">
+          <FileText className="h-5 w-5 text-red-600 shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-red-800">Erro</p>
+            <p className="text-sm text-red-700 mt-0.5">{error}</p>
+          </div>
+        </div>
+      )}
+
+      <button
+        type="submit"
+        disabled={uploading || !file || !hasSupabaseConfig}
+        className="w-full py-3.5 rounded-lg font-semibold text-white bg-pink-600 hover:bg-pink-700 shadow-md hover:shadow-lg transition-all disabled:bg-gray-300 disabled:shadow-none disabled:cursor-not-allowed flex items-center justify-center gap-2"
+      >
+        {uploading ? (
+          <>
+            <Camera size={18} className="animate-pulse" />
+            A enviar fotografia...
+          </>
+        ) : (
+          "Publicar Fotografia"
+        )}
+      </button>
+    </form>
   );
 }
-

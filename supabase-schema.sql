@@ -1,96 +1,146 @@
 -- ============================================================================
--- SCHEMA DA BASE DE DADOS – GALERIA DE FOTOGRAFIAS
--- Executa este SQL no SQL Editor do teu projeto Supabase
+-- SCHEMA DA BASE DE DADOS - GALERIA DE FOTOGRAFIAS (PhotoGrid)
+-- Executar no SQL Editor do Supabase:
+-- https://supabase.com/dashboard/project/umthukcidhsbfxqomzgt/sql/new
+-- Idempotente: pode ser executado mais do que uma vez.
 -- ============================================================================
 
--- 1. Habilitar a extensão UUID (necessária para gerar IDs)
-create extension if not exists "uuid-ossp";
+-- 1. Extensoes
+create extension if not exists "pgcrypto";
 
 -- 2. Tabela de fotografias
 create table if not exists public.photos (
-  id uuid primary key default gen_random_uuid(),
-  title text not null,
-  description text,
-  image_url text not null,           -- URL pública da imagem (Storage)
-  storage_path text not null,        -- Caminho dentro do bucket
-  category text default 'geral',     -- Categoria (paisagem, retrato, etc.)
-  tags text[] default '{}',          -- Array de tags
-  width integer,                     -- Largura em px
-  height integer,                    -- Altura em px
-  size_bytes bigint,                 -- Tamanho do ficheiro em bytes
-  uploaded_by uuid references auth.users(id) on delete set null,
-  created_at timestamptz default now(),
-  updated_at timestamptz default now()
+  id            uuid primary key default gen_random_uuid(),
+  title         text not null,
+  description   text,
+  image_url     text not null,
+  storage_path  text not null,
+  category      text not null default 'geral',
+  tags          text[] not null default '{}',
+  width         integer,
+  height        integer,
+  size_bytes    bigint,
+  uploaded_by   uuid references auth.users(id) on delete set null,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
 );
 
--- Índices para consultas rápidas
-create index if not exists photos_category_idx on public.photos(category);
-create index if not exists photos_created_at_idx on public.photos(created_at desc);
+-- 3. Indices
+create index if not exists photos_category_idx   on public.photos (category);
+create index if not exists photos_created_at_idx on public.photos (created_at desc);
 
--- 3. Habilitar RLS (Row Level Security)
+-- 4. Row Level Security na tabela
 alter table public.photos enable row level security;
 
--- Políticas de leitura: qualquer pessoa pode ver as fotografias
-create policy "Fotos visíveis para todos"
+drop policy if exists "Fotos visiveis para todos" on public.photos;
+create policy "Fotos visiveis para todos"
   on public.photos for select
+  to anon, authenticated
   using (true);
 
--- Políticas de inserção: apenas utilizadores autenticados podem adicionar
-create policy "Utilizadores autenticados podem inserir fotos"
+drop policy if exists "Autenticados podem inserir fotos" on public.photos;
+create policy "Autenticados podem inserir fotos"
   on public.photos for insert
+  to authenticated
   with check (auth.uid() = uploaded_by);
 
--- Políticas de atualização: apenas o autor pode editar
+drop policy if exists "Autor pode atualizar a sua foto" on public.photos;
 create policy "Autor pode atualizar a sua foto"
   on public.photos for update
-  using (auth.uid() = uploaded_by);
+  to authenticated
+  using (auth.uid() = uploaded_by)
+  with check (auth.uid() = uploaded_by);
 
--- Políticas de eliminação: apenas o autor pode eliminar
+drop policy if exists "Autor pode eliminar a sua foto" on public.photos;
 create policy "Autor pode eliminar a sua foto"
   on public.photos for delete
+  to authenticated
   using (auth.uid() = uploaded_by);
 
--- 4. Bucket de Storage para as imagens
-insert into storage.buckets (id, name, public)
-values ('photo-gallery', 'photo-gallery', true)
-on conflict (id) do nothing;
+-- ============================================================================
+-- 5. Storage: bucket publico "photo-gallery"
+-- ============================================================================
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'photo-gallery',
+  'photo-gallery',
+  true,
+  10485760, -- 10 MB
+  array['image/jpeg','image/png','image/webp','image/gif','image/avif']
+)
+on conflict (id) do update
+  set public = true,
+      file_size_limit = 10485760,
+      allowed_mime_types = array['image/jpeg','image/png','image/webp','image/gif','image/avif'];
 
--- Políticas do bucket
-create policy "Imagens públicas para leitura"
+-- Leitura publica das imagens
+drop policy if exists "Imagens publicas para leitura" on storage.objects;
+create policy "Imagens publicas para leitura"
   on storage.objects for select
+  to anon, authenticated
   using (bucket_id = 'photo-gallery');
 
-create policy "Utilizadores autenticados podem fazer upload"
+-- Upload: cada utilizador escreve na sua propria pasta <uid>/...
+drop policy if exists "Autenticados podem fazer upload" on storage.objects;
+create policy "Autenticados podem fazer upload"
   on storage.objects for insert
-  with check (bucket_id = 'photo-gallery' and auth.uid()::text = (storage.folder(name))[1]);
+  to authenticated
+  with check (
+    bucket_id = 'photo-gallery'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
 
-create policy "Utilizadores podem atualizar as suas imagens"
+drop policy if exists "Autores podem atualizar as suas imagens" on storage.objects;
+create policy "Autores podem atualizar as suas imagens"
   on storage.objects for update
-  using (bucket_id = 'photo-gallery' and auth.uid()::text = (storage.folder(name))[1]);
+  to authenticated
+  using (
+    bucket_id = 'photo-gallery'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  )
+  with check (
+    bucket_id = 'photo-gallery'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
 
-create policy "Utilizadores podem eliminar as suas imagens"
+drop policy if exists "Autores podem eliminar as suas imagens" on storage.objects;
+create policy "Autores podem eliminar as suas imagens"
   on storage.objects for delete
-  using (bucket_id = 'photo-gallery' and auth.uid()::text = (storage.folder(name))[1]);
+  to authenticated
+  using (
+    bucket_id = 'photo-gallery'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
 
--- 5. Função para atualizar o updated_at automaticamente
+-- ============================================================================
+-- 6. updated_at automatico
+-- ============================================================================
 create or replace function public.update_updated_at_column()
-returns trigger as $$
+returns trigger
+language plpgsql
+as $$
 begin
   new.updated_at = now();
   return new;
 end;
-$$ language plpgsql;
+$$;
 
+drop trigger if exists update_photos_updated_at on public.photos;
 create trigger update_photos_updated_at
   before update on public.photos
   for each row
   execute function public.update_updated_at_column();
 
 -- ============================================================================
--- COMENTÁRIOS
+-- 7. Recarregar o cache de schema do PostgREST
 -- ============================================================================
--- Após executar este SQL:
--- 1. Vai em Storage > Buckets e confirma que "photo-gallery" está público
--- 2. Copia a URL do projeto e a chave anon (anon key) para o .env.local
--- 3. Executa npm run dev para testar localmente
+notify pgrst, 'reload schema';
+
+-- ============================================================================
+-- DEPOIS DE EXECUTAR:
+-- 1. Authentication > Sign In / Providers > ativar "Allow anonymous sign-ins"
+--    (necessario para o upload funcionar sem login)
+-- 2. Storage > Buckets > confirmar que "photo-gallery" esta Public
+-- 3. Se nao quiseres ativar sessao anonima, executa antes
+--    supabase-schema-public-write.sql (escrita publica, apenas para demo)
 -- ============================================================================
