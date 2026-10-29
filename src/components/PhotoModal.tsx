@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Image from "next/image";
 import { Photo } from "@/types/database";
-import { X, Download, ExternalLink, Calendar, Tag } from "lucide-react";
+import { X, Download, ExternalLink, Calendar, Tag, ImageOff } from "lucide-react";
 
 interface PhotoModalProps {
   photo: Photo;
@@ -19,6 +19,8 @@ function formatDate(value: string) {
 }
 
 export default function PhotoModal({ photo, onClose }: PhotoModalProps) {
+  const [failed, setFailed] = useState(false);
+
   useEffect(() => {
     function handleKey(event: KeyboardEvent) {
       if (event.key === "Escape") onClose();
@@ -87,16 +89,31 @@ export default function PhotoModal({ photo, onClose }: PhotoModalProps) {
           </div>
         </div>
 
-        <div className="relative flex-1 min-h-0 bg-black">
-          <Image
-            src={photo.image_url}
-            alt={photo.title}
-            width={1600}
-            height={1000}
-            sizes="(max-width: 1024px) 100vw, 1024px"
-            className="w-full h-full max-h-[64vh] object-contain"
-            priority
-          />
+        <div className="relative h-[62vh] w-full bg-black">
+          {failed ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-gray-500">
+              <ImageOff size={34} strokeWidth={1.4} />
+              <p className="text-sm">Nao foi possivel carregar a imagem</p>
+              <a
+                href={photo.image_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-pink-400 underline hover:text-pink-300"
+              >
+                Abrir o ficheiro original
+              </a>
+            </div>
+          ) : (
+            <Image
+              src={photo.image_url}
+              alt={photo.title}
+              fill
+              sizes="(max-width: 1024px) 100vw, 1024px"
+              loading="eager"
+              onError={() => setFailed(true)}
+              className="object-contain"
+            />
+          )}
         </div>
 
         {(photo.description || (photo.tags && photo.tags.length > 0)) && (
